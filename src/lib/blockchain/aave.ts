@@ -10,12 +10,12 @@ import {
   calculateLiquidationPrice,
 } from '@/lib/utils/calculations';
 
-// Aave V3 Pool ABI (extended for real calls)
+// Aave V3 Pool ABI
 export const AAVE_POOL_ABI = parseAbi([
   'function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external',
   'function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf) external',
   'function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)',
-  'function getReserveData(address asset) view returns (tuple(uint256 configuration, uint128 liquidityIndex, uint128 variableBorrowIndex, uint128 currentLiquidityRate, uint128 currentVariableBorrowRate, uint128 currentStableBorrowRate, uint40 lastUpdateTimestamp, uint16 id, address aTokenAddress, address stableDebtTokenAddress, address variableDebtTokenAddress, address interestRateStrategyAddress, uint128 accruedToTreasury))',
+  'function getReserveData(address asset) view returns (uint256 configuration, uint128 liquidityIndex, uint128 variableBorrowIndex, uint128 liquidityRate, uint128 variableBorrowRate, uint128 stableBorrowRate, uint40 lastUpdateTimestamp, uint16 id, address aTokenAddress, address stableDebtTokenAddress, address variableDebtTokenAddress, address interestRateStrategyAddress, uint128 accruedToTreasury)',
 ]);
 
 // ERC20 ABI
@@ -27,20 +27,20 @@ export const ERC20_ABI = parseAbi([
   'function symbol() view returns (string)',
 ]);
 
-// Aave Pool Addresses Provider (to get current pool address)
-const AAVE_ADDRESSES_PROVIDER: Record<string, Address> = {
-  base: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D',
-  arbitrum: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
-  ethereum: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
-  polygon: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
-  optimism: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
+// Aave V3 Pool Addresses (the actual Pool contract, not the Provider)
+const AAVE_POOL_ADDRESSES: Record<string, Address> = {
+  base: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+  arbitrum: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+  ethereum: '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
+  polygon: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+  optimism: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
 };
 
 // Token addresses on Base
 const TOKEN_ADDRESSES: Record<string, Address> = {
   USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  USDT: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',
-  DAI: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb', // Note: This might need updating
+  USDT: '0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2', // Fixed: was same as DAI
+  DAI: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',
   WETH: '0x4200000000000000000000000000000000000006',
   ETH: '0x4200000000000000000000000000000000000006', // WETH on Base
   WBTC: '0x1ceA5F5C31664024eeF706FeC2E74E5298Ca60e1', // cbBTC on Base
@@ -49,6 +49,13 @@ const TOKEN_ADDRESSES: Record<string, Address> = {
 
 // Aave Referral Code - set in env
 export const LOANFI_REFERRAL_CODE = config.aaveReferralCode;
+
+/**
+ * Get Aave Pool address for a chain
+ */
+export function getAavePoolAddress(chainName: string): Address | undefined {
+  return AAVE_POOL_ADDRESSES[chainName];
+}
 
 /**
  * Get current borrow APR from Aave for a specific asset
@@ -64,13 +71,14 @@ export async function getAaveBorrowAPR(
 
   try {
     const client = createPublicClientForChain(chainName);
-    const poolAddress = AAVE_ADDRESSES_PROVIDER[chainName];
+    const poolAddress = getAavePoolAddress(chainName);
     
     if (!poolAddress) {
-      throw new Error(`No Aave pool for chain: ${chainName}`);
+      console.warn(`No Aave pool address for chain: ${chainName}`);
+      return 0.042;
     }
 
-    // Call getReserveData to get currentVariableBorrowRate
+    // Call getReserveData on the POOL contract (not the provider)
     const reserveData = await client.readContract({
       address: poolAddress,
       abi: AAVE_POOL_ABI,
@@ -78,18 +86,17 @@ export async function getAaveBorrowAPR(
       args: [assetAddress],
     });
 
-    // currentVariableBorrowRate is at index 4 (uint128)
+    // variableBorrowRate is at index 4 (uint128)
     const variableBorrowRate = reserveData[4];
     
     // Convert from ray (27 decimals) to APR
-    // Aave stores rates as ray (10^27)
     const rateInRay = Number(variableBorrowRate);
     const apr = rateInRay / 1e27;
     
-    return apr;
+    return apr > 0 ? apr : 0.042; // Fallback if rate is 0
   } catch (error) {
     console.error(`Failed to get Aave borrow APR for ${assetAddress}:`, error);
-    // Return mock rate as fallback
+    // Return reasonable fallback
     return 0.042;
   }
 }
@@ -121,7 +128,7 @@ export async function getUserAaveData(
 
   try {
     const client = createPublicClientForChain(chainName);
-    const poolAddress = AAVE_ADDRESSES_PROVIDER[chainName];
+    const poolAddress = getAavePoolAddress(chainName);
     
     if (!poolAddress) return null;
 
@@ -146,6 +153,58 @@ export async function getUserAaveData(
   } catch (error) {
     console.error(`Failed to get user Aave data for ${userAddress}:`, error);
     return null;
+  }
+}
+
+/**
+ * Calculate required collateral amount for a loan
+ */
+export async function calculateRequiredCollateral(
+  borrowAmountUSD: number,
+  collateralToken: string,
+  minCollateralRatio: number,
+  chainName: string = 'base'
+): Promise<{ amount: number; valueUSD: number }> {
+  // Required collateral value = borrow amount * collateral ratio
+  const requiredValueUSD = borrowAmountUSD * minCollateralRatio;
+  
+  // Get collateral token price
+  const price = await getTokenPrice(collateralToken, chainName);
+  
+  // Calculate token amount needed
+  const requiredAmount = requiredValueUSD / price.priceUSD;
+  
+  return {
+    amount: requiredAmount,
+    valueUSD: requiredValueUSD,
+  };
+}
+
+/**
+ * Check if user has sufficient balance
+ */
+export async function checkSufficientBalance(
+  chainName: string,
+  tokenAddress: Address,
+  userAddress: Address,
+  requiredAmount: bigint
+): Promise<{ sufficient: boolean; balance: bigint; deficit: bigint }> {
+  try {
+    const client = createPublicClientForChain(chainName);
+    const balance = await client.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [userAddress],
+    });
+    
+    const sufficient = balance >= requiredAmount;
+    const deficit = sufficient ? BigInt(0) : requiredAmount - balance;
+    
+    return { sufficient, balance, deficit };
+  } catch (error) {
+    console.error(`Failed to check balance for ${userAddress}:`, error);
+    return { sufficient: false, balance: BigInt(0), deficit: requiredAmount };
   }
 }
 
@@ -303,10 +362,20 @@ export async function getTokenDecimals(
   chainName: string,
   tokenAddress: Address
 ): Promise<number> {
+  // Check known tokens first
+  const knownDecimals: Record<string, number> = {
+    [TOKEN_ADDRESSES.USDC]: 6,
+    [TOKEN_ADDRESSES.USDT]: 6,
+    [TOKEN_ADDRESSES.DAI]: 18,
+    [TOKEN_ADDRESSES.WETH]: 18,
+    [TOKEN_ADDRESSES.cbETH]: 18,
+  };
+  
+  if (knownDecimals[tokenAddress]) {
+    return knownDecimals[tokenAddress];
+  }
+
   if (config.mockBlockchain) {
-    // Common decimals
-    if (tokenAddress === TOKEN_ADDRESSES.USDC) return 6;
-    if (tokenAddress === TOKEN_ADDRESSES.USDT) return 6;
     return 18;
   }
 

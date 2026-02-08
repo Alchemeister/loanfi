@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { WidgetExecuteSchema } from '@/lib/utils/validation';
-import { buildBorrowAndPayTransaction, getTokenAddress, getTokenDecimals } from '@/lib/blockchain/aave';
+import { 
+  buildBorrowAndPayTransaction, 
+  getTokenAddress, 
+  getTokenDecimals,
+  calculateRequiredCollateral,
+  checkSufficientBalance,
+  getAavePoolAddress,
+} from '@/lib/blockchain/aave';
 import { ApiResponse } from '@/types';
 import { type Address, parseUnits } from 'viem';
-import { config } from '@/lib/config/env';
 
 interface TransactionData {
   steps: Array<{
@@ -17,6 +23,7 @@ interface TransactionData {
   borrowAmount: string;
   collateralAmount: string;
   chain: string;
+  warnings?: string[];
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<TransactionData>>> {
@@ -73,7 +80,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
 
     // Get token addresses
     const borrowTokenAddress = getTokenAddress(session.token);
-    const collateralTokenAddress = getTokenAddress(session.collateralToken || 'WETH');
+    const collateralToken = session.collateralToken || 'WETH';
+    const collateralTokenAddress = getTokenAddress(collateralToken);
 
     if (!borrowTokenAddress || !collateralTokenAddress) {
       return NextResponse.json(
@@ -82,20 +90,62 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
       );
     }
 
+    // Calculate required collateral based on loan terms
+    const borrowTokenPrice = await db.tokenPrices.findByToken(session.token);
+    const borrowAmountUSD = session.amount * (borrowTokenPrice?.priceUSD || 1);
+    
+    const requiredCollateral = await calculateRequiredCollateral(
+      borrowAmountUSD,
+      collateralToken,
+      pool.minCollateralRatio,
+      session.chain
+    );
+
+    // Use session collateral amount if provided, otherwise use calculated minimum
+    // Add 10% buffer for safety
+    const collateralAmount = session.collateralAmount 
+      ? Math.max(session.collateralAmount, requiredCollateral.amount * 1.1)
+      : requiredCollateral.amount * 1.1;
+
     // Get token decimals for proper amount conversion
     const borrowDecimals = await getTokenDecimals(session.chain, borrowTokenAddress);
     const collateralDecimals = await getTokenDecimals(session.chain, collateralTokenAddress);
 
     // Convert amounts to wei
     const borrowAmountWei = parseUnits(session.amount.toString(), borrowDecimals);
-    
-    // Estimate collateral (use session amount or default to 0.25 ETH)
-    const collateralAmount = session.collateralAmount || 0.25;
     const collateralAmountWei = parseUnits(collateralAmount.toString(), collateralDecimals);
+
+    // Check if user has sufficient balance
+    const balanceCheck = await checkSufficientBalance(
+      session.chain,
+      collateralTokenAddress,
+      borrowerAddress as Address,
+      collateralAmountWei
+    );
+
+    if (!balanceCheck.sufficient) {
+      const deficitFormatted = Number(balanceCheck.deficit) / (10 ** collateralDecimals);
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: `Insufficient ${collateralToken} balance. Need ${deficitFormatted.toFixed(4)} more.` 
+        },
+        { status: 400 }
+      );
+    }
+
+    // Get the correct Aave Pool address
+    const poolAddress = getAavePoolAddress(session.chain);
+    if (!poolAddress) {
+      return NextResponse.json(
+        { success: false, error: `No Aave pool available for ${session.chain}` },
+        { status: 400 }
+      );
+    }
 
     // Build transaction data
     const txData = buildBorrowAndPayTransaction({
-      poolAddress: pool.contractAddress as Address,
+      poolAddress,
       collateralToken: collateralTokenAddress,
       collateralAmount: collateralAmountWei,
       borrowToken: borrowTokenAddress,
@@ -107,6 +157,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
     // Update session with selection
     await db.sessions.update(sessionId, {
       selectedOptionId: optionId,
+      collateralToken,
+      collateralAmount,
     });
 
     // Log audit
@@ -119,9 +171,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
         poolId,
         amount: session.amount,
         token: session.token,
+        collateralAmount,
+        collateralToken,
       },
       success: true,
     });
+
+    // Build warnings
+    const warnings: string[] = [];
+    if (balanceCheck.balance < collateralAmountWei * BigInt(2)) {
+      warnings.push(`Low ${collateralToken} balance remaining after transaction`);
+    }
 
     // Return transaction steps for user to sign
     return NextResponse.json({
@@ -132,13 +192,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
             name: 'Approve Collateral',
             to: txData.approveCollateral.to,
             data: txData.approveCollateral.data,
-            description: `Approve ${session.collateralToken || 'WETH'} for deposit`,
+            description: `Approve ${collateralAmount.toFixed(4)} ${collateralToken} for deposit`,
           },
           {
             name: 'Supply Collateral',
             to: txData.supplyCollateral.to,
             data: txData.supplyCollateral.data,
-            description: `Deposit collateral to ${pool.name}`,
+            description: `Deposit ${collateralAmount.toFixed(4)} ${collateralToken} to ${pool.name}`,
           },
           {
             name: 'Borrow',
@@ -153,10 +213,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
             description: `Send ${session.amount} ${session.token} to merchant`,
           },
         ],
-        poolAddress: pool.contractAddress as Address,
+        poolAddress,
         borrowAmount: borrowAmountWei.toString(),
         collateralAmount: collateralAmountWei.toString(),
         chain: session.chain,
+        warnings: warnings.length > 0 ? warnings : undefined,
       },
     });
   } catch (error) {
@@ -164,7 +225,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
     console.error(`Error ${errorId}:`, error);
 
     return NextResponse.json(
-      { success: false, error: 'Something went wrong', errorId },
+      { success: false, error: 'Transaction build failed', errorId },
       { status: 500 }
     );
   }

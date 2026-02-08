@@ -1,5 +1,5 @@
 // Chain types
-export type Chain = 'base' | 'arbitrum';
+export type Chain = 'base' | 'arbitrum' | 'ethereum' | 'polygon' | 'optimism';
 
 // Merchant - uses the widget
 export interface Merchant {
@@ -9,6 +9,11 @@ export interface Merchant {
   apiKey: string;
   allowedOrigins: string[];
   createdAt: Date;
+  updatedAt: Date;
+  isActive: boolean;
+  isVerified: boolean;
+  email?: string;
+  website?: string;
 }
 
 // Lending pool (Aave, Compound, etc.)
@@ -59,8 +64,13 @@ export interface WidgetSession {
   token: string;
   recipient: string;
   chain: Chain;
+  status: 'pending' | 'completed' | 'expired' | 'cancelled';
   expiresAt: Date;
   createdAt: Date;
+  updatedAt: Date;
+  collateralToken?: string;
+  collateralAmount?: number;
+  selectedOptionId?: string;
 }
 
 // Completed loan record
