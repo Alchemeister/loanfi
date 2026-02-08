@@ -1,0 +1,322 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Supported blockchain chains
+enum Chain {
+  base
+  arbitrum
+  ethereum
+  polygon
+  optimism
+}
+
+// Loan status lifecycle
+enum LoanStatus {
+  active
+  repaid
+  liquidated
+  defaulted
+}
+
+// Session status
+enum SessionStatus {
+  pending
+  completed
+  expired
+  cancelled
+}
+
+// Merchant - Business using the widget
+model Merchant {
+  id             String   @id @default(cuid())
+  name           String
+  walletAddress  String   @unique // Ethereum address where payments go
+  apiKey         String   @unique @default(uuid())
+  apiSecretHash  String?  // For additional authentication
+  allowedOrigins String[] // CORS whitelist
+  
+  // Contact info
+  email          String?
+  website        String?
+  
+  // Status
+  isActive       Boolean  @default(true)
+  isVerified     Boolean  @default(false)
+  
+  // Timestamps
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  sessions       WidgetSession[]
+  loans          Loan[]
+  
+  @@index([apiKey])
+  @@index([walletAddress])
+  @@map("merchants")
+}
+
+// Lending Pool (Aave, Compound, etc.)
+model LendingPool {
+  id                   String   @id @default(cuid())
+  name                 String   // "Aave V3"
+  protocol             String   // "aave", "compound", "spark"
+  chain                Chain
+  contractAddress      String   // Pool contract address
+  
+  // Pool parameters
+  borrowAPR            Float    // Current variable borrow rate
+  supplyAPR            Float    // Current supply rate
+  minCollateralRatio   Float    // e.g., 1.5 = 150%
+  liquidationThreshold Float    // e.g., 0.8 = 80%
+  liquidationBonus     Float    // e.g., 0.05 = 5%
+  
+  // Supported assets
+  supportedCollateral  String[] // ['ETH', 'WETH', 'WBTC']
+  supportedBorrow      String[] // ['USDC', 'USDT', 'DAI']
+  
+  // Status
+  isActive             Boolean  @default(true)
+  tvl                  Float?   // Total Value Locked (USD)
+  
+  // Timestamps
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  lastUpdatedAt        DateTime @default(now()) // For rate updates
+  
+  // Relations
+  loans                Loan[]
+  
+  @@index([chain])
+  @@index([protocol])
+  @@index([isActive])
+  @@map("lending_pools")
+}
+
+// Widget Session - Temporary session for checkout
+model WidgetSession {
+  id            String        @id @default(cuid())
+  
+  // Session parameters
+  amount        Float         // Payment amount
+  token         String        // Payment token (USDC, USDT, DAI)
+  recipient     String        // Merchant wallet (verified)
+  chain         Chain         @default(base)
+  
+  // Status
+  status        SessionStatus @default(pending)
+  
+  // Expiry
+  expiresAt     DateTime      // 15 minutes from creation
+  completedAt   DateTime?
+  
+  // Optional: User selections
+  collateralToken   String?
+  collateralAmount  Float?
+  selectedOptionId  String?
+  
+  // Relations
+  merchantId    String
+  merchant      Merchant      @relation(fields: [merchantId], references: [id])
+  
+  loanId        String?       @unique
+  loan          Loan?         @relation(fields: [loanId], references: [id])
+  
+  // Timestamps
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  
+  @@index([merchantId])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("widget_sessions")
+}
+
+// Completed Loan
+model Loan {
+  id                String   @id @default(cuid())
+  
+  // Parties
+  borrowerAddress   String   // User who borrowed
+  merchantId        String
+  merchant          Merchant @relation(fields: [merchantId], references: [id])
+  merchantAddress   String   // Denormalized for safety
+  
+  // Pool
+  poolId            String
+  pool              LendingPool @relation(fields: [poolId], references: [id])
+  chain             Chain
+  
+  // Loan terms
+  principalAmount   Float
+  principalToken    String   // USDC, USDT, etc.
+  termMonths        Int      // 3, 6, 8, 12
+  apr               Float    // Effective APR
+  monthlyPayment    Float
+  totalRepayment    Float
+  
+  // Collateral
+  collateralAmount  Float
+  collateralToken   String   // ETH, WETH, WBTC, etc.
+  collateralValueUSD Float   // At time of loan
+  
+  // Current state
+  currentDebt       Float    // Remaining balance
+  healthFactor      Float    // Current health factor
+  status            LoanStatus @default(active)
+  
+  // Liquidation tracking
+  liquidationPrice  Float?   // Price at which liquidation occurs
+  liquidationTxHash String?  // If liquidated
+  
+  // Transactions
+  borrowTxHash      String   @unique
+  paymentTxHash     String   @unique
+  
+  // Repayment tracking
+  paymentsMade      Int      @default(0)
+  lastPaymentAt     DateTime?
+  nextPaymentDue    DateTime?
+  paidOffAt         DateTime?
+  
+  // Relations
+  session           WidgetSession?
+  repayments        Repayment[]
+  
+  // Timestamps
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([borrowerAddress])
+  @@index([merchantId])
+  @@index([poolId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("loans")
+}
+
+// Repayment record
+model Repayment {
+  id          String   @id @default(cuid())
+  
+  loanId      String
+  loan        Loan     @relation(fields: [loanId], references: [id])
+  
+  amount      Float
+  token       String
+  txHash      String   @unique
+  
+  // Payment info
+  paidAt      DateTime
+  isOnTime    Boolean  @default(true)
+  daysLate    Int?     // If late
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  
+  @@index([loanId])
+  @@index([paidAt])
+  @@map("repayments")
+}
+
+// Token price cache
+model TokenPrice {
+  id            String   @id @default(cuid())
+  
+  token         String   @unique // ETH, USDC, etc.
+  symbol        String
+  priceUSD      Float
+  confidence    String   // 'high', 'medium', 'low'
+  
+  // Sources
+  chainlinkPrice Float?
+  coingeckoPrice Float?
+  deviation      Float?   // Price deviation between sources
+  
+  // Timestamps
+  updatedAt     DateTime @updatedAt
+  createdAt     DateTime @default(now())
+  
+  @@index([token])
+  @@map("token_prices")
+}
+
+// Rate limiting
+model RateLimit {
+  id        String   @id @default(cuid())
+  
+  key       String   // e.g., "merchant:merch_abc123" or "ip:1.2.3.4"
+  count     Int      @default(0)
+  window    DateTime // Reset window
+  
+  createdAt DateTime @default(now())
+  
+  @@index([key])
+  @@index([window])
+  @@map("rate_limits")
+}
+
+// Audit log for security
+model AuditLog {
+  id          String   @id @default(cuid())
+  
+  event       String   // 'widget_init', 'loan_created', 'payment_received'
+  merchantId  String?
+  sessionId   String?
+  loanId      String?
+  
+  // Request details
+  ipAddress   String?
+  userAgent   String?
+  origin      String?
+  
+  // Payload (sanitized)
+  payload     Json?
+  
+  // Result
+  success     Boolean
+  error       String?
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  
+  @@index([merchantId])
+  @@index([event])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// API Keys for B2B access (future)
+model ApiKey {
+  id          String   @id @default(cuid())
+  
+  merchantId  String
+  name        String   // e.g., "Production", "Development"
+  key         String   @unique
+  secretHash  String
+  
+  // Permissions
+  permissions String[] // ['read:loans', 'write:loans', 'read:analytics']
+  
+  // Status
+  isActive    Boolean  @default(true)
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  revokedAt   DateTime?
+  
+  @@index([merchantId])
+  @@index([key])
+  @@map("api_keys")
+}

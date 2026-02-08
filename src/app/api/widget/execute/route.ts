@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { WidgetExecuteSchema } from '@/lib/utils/validation';
-import { buildBorrowAndPayTransaction, getTokenAddress } from '@/lib/blockchain/aave';
-import { TOKEN_DECIMALS } from '@/lib/blockchain/constants';
+import { buildBorrowAndPayTransaction, getTokenAddress, getTokenDecimals } from '@/lib/blockchain/aave';
 import { ApiResponse } from '@/types';
-import { type Address } from 'viem';
+import { type Address, parseUnits } from 'viem';
+import { config } from '@/lib/config/env';
 
 interface TransactionData {
   steps: Array<{
@@ -16,6 +16,7 @@ interface TransactionData {
   poolAddress: Address;
   borrowAmount: string;
   collateralAmount: string;
+  chain: string;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<TransactionData>>> {
@@ -34,7 +35,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
     const { sessionId, optionId, borrowerAddress } = parsed.data;
 
     // Get session
-    const session = db.sessions.findById(sessionId);
+    const session = await db.sessions.findById(sessionId);
     if (!session) {
       return NextResponse.json(
         { success: false, error: 'Session not found' },
@@ -44,7 +45,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
 
     // Check session expiry
     if (db.sessions.isExpired(session)) {
-      db.sessions.delete(sessionId);
+      await db.sessions.update(sessionId, { status: 'expired' });
       return NextResponse.json(
         { success: false, error: 'Session expired' },
         { status: 410 }
@@ -52,7 +53,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
     }
 
     // Get merchant (for verified recipient address)
-    const merchant = db.merchants.findById(session.merchantId);
+    const merchant = await db.merchants.findById(session.merchantId);
     if (!merchant) {
       return NextResponse.json(
         { success: false, error: 'Merchant not found' },
@@ -72,7 +73,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
 
     // Get token addresses
     const borrowTokenAddress = getTokenAddress(session.token);
-    const collateralTokenAddress = getTokenAddress('WETH'); // Default to WETH for now
+    const collateralTokenAddress = getTokenAddress(session.collateralToken || 'WETH');
 
     if (!borrowTokenAddress || !collateralTokenAddress) {
       return NextResponse.json(
@@ -81,12 +82,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
       );
     }
 
-    // Convert amounts to wei (using proper decimals)
-    const borrowDecimals = TOKEN_DECIMALS[session.token] || 18;
-    const borrowAmountWei = BigInt(Math.floor(session.amount * 10 ** borrowDecimals));
+    // Get token decimals for proper amount conversion
+    const borrowDecimals = await getTokenDecimals(session.chain, borrowTokenAddress);
+    const collateralDecimals = await getTokenDecimals(session.chain, collateralTokenAddress);
 
-    // Estimate collateral (for demo, use 0.25 ETH per $500)
-    const collateralAmountWei = BigInt(Math.floor(0.25 * 10 ** 18));
+    // Convert amounts to wei
+    const borrowAmountWei = parseUnits(session.amount.toString(), borrowDecimals);
+    
+    // Estimate collateral (use session amount or default to 0.25 ETH)
+    const collateralAmount = session.collateralAmount || 0.25;
+    const collateralAmountWei = parseUnits(collateralAmount.toString(), collateralDecimals);
 
     // Build transaction data
     const txData = buildBorrowAndPayTransaction({
@@ -99,6 +104,25 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
       recipient: merchant.walletAddress as Address, // ALWAYS use verified merchant wallet
     });
 
+    // Update session with selection
+    await db.sessions.update(sessionId, {
+      selectedOptionId: optionId,
+    });
+
+    // Log audit
+    await db.auditLogs.create({
+      event: 'widget_execute',
+      merchantId: session.merchantId,
+      sessionId,
+      payload: {
+        borrowerAddress,
+        poolId,
+        amount: session.amount,
+        token: session.token,
+      },
+      success: true,
+    });
+
     // Return transaction steps for user to sign
     return NextResponse.json({
       success: true,
@@ -108,13 +132,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
             name: 'Approve Collateral',
             to: txData.approveCollateral.to,
             data: txData.approveCollateral.data,
-            description: 'Approve WETH for deposit',
+            description: `Approve ${session.collateralToken || 'WETH'} for deposit`,
           },
           {
             name: 'Supply Collateral',
             to: txData.supplyCollateral.to,
             data: txData.supplyCollateral.data,
-            description: 'Deposit collateral to Aave',
+            description: `Deposit collateral to ${pool.name}`,
           },
           {
             name: 'Borrow',
@@ -132,6 +156,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<T
         poolAddress: pool.contractAddress as Address,
         borrowAmount: borrowAmountWei.toString(),
         collateralAmount: collateralAmountWei.toString(),
+        chain: session.chain,
       },
     });
   } catch (error) {

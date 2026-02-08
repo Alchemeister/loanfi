@@ -3,6 +3,7 @@ import { db } from '@/lib/db';
 import { WidgetOptionsSchema } from '@/lib/utils/validation';
 import { generateLoanOptions } from '@/lib/blockchain/aave';
 import { ApiResponse, LoanOption } from '@/types';
+import { config } from '@/lib/config/env';
 
 export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{ options: LoanOption[] }>>> {
   try {
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
     const { sessionId, collateralToken, collateralAmount } = parsed.data;
 
     // Get session
-    const session = db.sessions.findById(sessionId);
+    const session = await db.sessions.findById(sessionId);
     if (!session) {
       return NextResponse.json(
         { success: false, error: 'Session not found' },
@@ -30,19 +31,26 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
 
     // Check session expiry
     if (db.sessions.isExpired(session)) {
-      db.sessions.delete(sessionId);
+      await db.sessions.update(sessionId, { status: 'expired' });
       return NextResponse.json(
         { success: false, error: 'Session expired' },
         { status: 410 }
       );
     }
 
-    // Generate loan options (server-side calculations)
+    // Update session with collateral selection
+    await db.sessions.update(sessionId, {
+      collateralToken,
+      collateralAmount,
+    });
+
+    // Generate loan options with real-time blockchain data
     const options = await generateLoanOptions(
       session.amount,
       session.token,
       collateralToken,
-      collateralAmount
+      collateralAmount,
+      session.chain
     );
 
     if (options.length === 0) {
@@ -50,6 +58,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
         { success: false, error: 'No loan options available for this collateral amount' },
         { status: 400 }
       );
+    }
+
+    // Log for analytics
+    if (config.isDevelopment) {
+      console.log(`Generated ${options.length} loan options for session ${sessionId}`);
     }
 
     return NextResponse.json({

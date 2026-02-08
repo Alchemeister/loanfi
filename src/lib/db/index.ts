@@ -1,114 +1,246 @@
-import { Merchant, WidgetSession, Loan, LendingPool } from '@/types';
+import { PrismaClient, Chain, LoanStatus, SessionStatus } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
+import { config } from '@/lib/config/env';
 
-// In-memory storage for MVP (replace with Prisma later)
-const merchants: Map<string, Merchant> = new Map();
-const sessions: Map<string, WidgetSession> = new Map();
-const loans: Map<string, Loan> = new Map();
+// Initialize Prisma client with logging in development
+const prisma = new PrismaClient({
+  log: config.logQueries
+    ? ['query', 'info', 'warn', 'error']
+    : config.isDevelopment
+    ? ['warn', 'error']
+    : ['error'],
+});
+
+// Re-export types
+export { prisma, Chain, LoanStatus, SessionStatus };
 
 // Mock lending pools with realistic Aave V3 data
-const pools: LendingPool[] = [
+// These are also in the database, but kept here for quick access
+const MOCK_POOLS = [
   {
     id: 'aave-v3-base',
     name: 'Aave V3',
-    chain: 'base',
-    contractAddress: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5', // Aave V3 Pool on Base
-    borrowAPR: 0.042, // 4.2%
+    protocol: 'aave',
+    chain: 'base' as Chain,
+    contractAddress: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+    borrowAPR: 0.042,
+    supplyAPR: 0.015,
     minCollateralRatio: 1.5,
     liquidationThreshold: 0.8,
+    liquidationBonus: 0.05,
     supportedCollateral: ['ETH', 'WETH', 'WBTC', 'cbETH'],
     supportedBorrow: ['USDC', 'USDT', 'DAI'],
+    isActive: true,
   },
   {
     id: 'compound-v3-base',
     name: 'Compound V3',
-    chain: 'base',
-    contractAddress: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf', // Compound V3 on Base
-    borrowAPR: 0.051, // 5.1%
+    protocol: 'compound',
+    chain: 'base' as Chain,
+    contractAddress: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf',
+    borrowAPR: 0.051,
+    supplyAPR: 0.018,
     minCollateralRatio: 1.4,
     liquidationThreshold: 0.825,
+    liquidationBonus: 0.05,
     supportedCollateral: ['ETH', 'WETH', 'cbETH'],
     supportedBorrow: ['USDC'],
+    isActive: true,
   },
 ];
 
-// Seed a demo merchant
-merchants.set('merch_demo123', {
-  id: 'merch_demo123',
-  name: 'Demo Store',
-  walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD78',
-  apiKey: 'demo_api_key_123',
-  allowedOrigins: ['http://localhost:3000', 'http://localhost:3001'],
-  createdAt: new Date(),
-});
-
-// Merchant operations
+// Database operations
 export const db = {
   merchants: {
-    findById: (id: string): Merchant | undefined => merchants.get(id),
-    findByApiKey: (apiKey: string): Merchant | undefined => {
-      for (const merchant of merchants.values()) {
-        if (merchant.apiKey === apiKey) return merchant;
-      }
-      return undefined;
+    findById: async (id: string) => {
+      return await prisma.merchant.findUnique({ where: { id } });
     },
-    create: (data: Omit<Merchant, 'id' | 'createdAt' | 'apiKey'>): Merchant => {
-      const merchant: Merchant = {
-        ...data,
-        id: `merch_${uuidv4().slice(0, 8)}`,
-        apiKey: `key_${uuidv4().replace(/-/g, '')}`,
-        createdAt: new Date(),
-      };
-      merchants.set(merchant.id, merchant);
-      return merchant;
+    
+    findByApiKey: async (apiKey: string) => {
+      return await prisma.merchant.findUnique({ where: { apiKey } });
     },
-    list: (): Merchant[] => Array.from(merchants.values()),
+    
+    create: async (data: { name: string; walletAddress: string; allowedOrigins: string[] }) => {
+      return await prisma.merchant.create({
+        data: {
+          ...data,
+          apiKey: `key_${uuidv4().replace(/-/g, '')}`,
+        },
+      });
+    },
+    
+    list: async () => {
+      return await prisma.merchant.findMany();
+    },
   },
 
   sessions: {
-    findById: (id: string): WidgetSession | undefined => sessions.get(id),
-    create: (data: Omit<WidgetSession, 'id' | 'createdAt' | 'expiresAt'>): WidgetSession => {
-      const session: WidgetSession = {
-        ...data,
-        id: `sess_${uuidv4().slice(0, 12)}`,
-        createdAt: new Date(),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
-      };
-      sessions.set(session.id, session);
-      return session;
+    findById: async (id: string) => {
+      return await prisma.widgetSession.findUnique({
+        where: { id },
+        include: { merchant: true, loan: true },
+      });
     },
-    delete: (id: string): void => {
-      sessions.delete(id);
+    
+    create: async (data: {
+      merchantId: string;
+      amount: number;
+      token: string;
+      recipient: string;
+      chain: Chain;
+    }) => {
+      return await prisma.widgetSession.create({
+        data: {
+          ...data,
+          status: 'pending',
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
+        },
+      });
     },
-    isExpired: (session: WidgetSession): boolean => {
+    
+    update: async (id: string, data: Partial<{
+      status: SessionStatus;
+      collateralToken: string;
+      collateralAmount: number;
+      selectedOptionId: string;
+      completedAt: Date;
+    }>) => {
+      return await prisma.widgetSession.update({
+        where: { id },
+        data,
+      });
+    },
+    
+    delete: async (id: string) => {
+      return await prisma.widgetSession.delete({ where: { id } });
+    },
+    
+    isExpired: (session: { expiresAt: Date }) => {
       return new Date() > session.expiresAt;
     },
   },
 
   pools: {
-    findById: (id: string): LendingPool | undefined => pools.find(p => p.id === id),
-    list: (chain?: string): LendingPool[] => {
-      if (chain) return pools.filter(p => p.chain === chain);
-      return pools;
+    findById: (id: string) => {
+      // Use in-memory for now until fully migrated to DB
+      return MOCK_POOLS.find(p => p.id === id);
+    },
+    
+    list: (chain?: string) => {
+      if (chain) return MOCK_POOLS.filter(p => p.chain === chain);
+      return MOCK_POOLS;
     },
   },
 
   loans: {
-    findById: (id: string): Loan | undefined => loans.get(id),
-    findByBorrower: (address: string): Loan[] => {
-      return Array.from(loans.values()).filter(l => l.borrowerAddress === address);
+    findById: async (id: string) => {
+      return await prisma.loan.findUnique({
+        where: { id },
+        include: { merchant: true, pool: true, session: true },
+      });
     },
-    findByMerchant: (merchantId: string): Loan[] => {
-      return Array.from(loans.values()).filter(l => l.merchantId === merchantId);
+    
+    findByBorrower: async (address: string) => {
+      return await prisma.loan.findMany({
+        where: { borrowerAddress: address },
+        orderBy: { createdAt: 'desc' },
+      });
     },
-    create: (data: Omit<Loan, 'id' | 'createdAt'>): Loan => {
-      const loan: Loan = {
-        ...data,
-        id: `loan_${uuidv4().slice(0, 12)}`,
-        createdAt: new Date(),
-      };
-      loans.set(loan.id, loan);
-      return loan;
+    
+    findByMerchant: async (merchantId: string) => {
+      return await prisma.loan.findMany({
+        where: { merchantId },
+        orderBy: { createdAt: 'desc' },
+      });
+    },
+    
+    create: async (data: {
+      borrowerAddress: string;
+      merchantId: string;
+      merchantAddress: string;
+      poolId: string;
+      chain: Chain;
+      principalAmount: number;
+      principalToken: string;
+      termMonths: number;
+      apr: number;
+      monthlyPayment: number;
+      collateralAmount: number;
+      collateralToken: string;
+      collateralValueUSD: number;
+      currentDebt: number;
+      healthFactor: number;
+      liquidationPrice: number;
+      borrowTxHash: string;
+      paymentTxHash: string;
+    }) => {
+      return await prisma.loan.create({
+        data: {
+          ...data,
+          status: 'active',
+          totalRepayment: data.monthlyPayment * data.termMonths,
+        },
+      });
+    },
+    
+    update: async (id: string, data: Partial<{
+      currentDebt: number;
+      healthFactor: number;
+      status: LoanStatus;
+      paymentsMade: number;
+      lastPaymentAt: Date;
+      nextPaymentDue: Date;
+      paidOffAt: Date;
+    }>) => {
+      return await prisma.loan.update({
+        where: { id },
+        data,
+      });
+    },
+  },
+
+  tokenPrices: {
+    findByToken: async (token: string) => {
+      return await prisma.tokenPrice.findUnique({
+        where: { token: token.toUpperCase() },
+      });
+    },
+    
+    update: async (token: string, data: {
+      priceUSD: number;
+      confidence?: string;
+      chainlinkPrice?: number;
+      coingeckoPrice?: number;
+      deviation?: number;
+    }) => {
+      return await prisma.tokenPrice.upsert({
+        where: { token: token.toUpperCase() },
+        update: data,
+        create: {
+          token: token.toUpperCase(),
+          symbol: token.toUpperCase(),
+          ...data,
+        },
+      });
+    },
+  },
+
+  auditLogs: {
+    create: async (data: {
+      event: string;
+      merchantId?: string;
+      sessionId?: string;
+      loanId?: string;
+      ipAddress?: string;
+      userAgent?: string;
+      origin?: string;
+      payload?: object;
+      success: boolean;
+      error?: string;
+    }) => {
+      return await prisma.auditLog.create({ data });
     },
   },
 };
+
+export default db;
