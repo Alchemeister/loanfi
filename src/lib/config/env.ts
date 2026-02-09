@@ -58,7 +58,7 @@ function parseEnv() {
   const parsed = envSchema.safeParse(process.env);
   
   if (!parsed.success) {
-    const errors = parsed.error.errors.map(
+    const errors = parsed.error.issues.map(
       (e) => `  ❌ ${e.path.join('.')}: ${e.message}`
     );
     
