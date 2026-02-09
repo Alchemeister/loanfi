@@ -1,15 +1,14 @@
 import { PrismaClient, Chain, LoanStatus, SessionStatus } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
-import { config } from '@/lib/config/env';
 
-// Initialize Prisma client with logging in development
-const prisma = new PrismaClient({
-  log: config.logQueries
-    ? ['query', 'info', 'warn', 'error']
-    : config.isDevelopment
-    ? ['warn', 'error']
-    : ['error'],
+// Initialize Prisma client
+const globalForPrisma = global as unknown as { prisma: PrismaClient };
+
+export const prisma = globalForPrisma.prisma || new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
 });
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
 
 // Re-export types
 export { prisma, Chain, LoanStatus, SessionStatus };

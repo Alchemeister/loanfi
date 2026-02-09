@@ -2,10 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { WidgetInitSchema } from '@/lib/utils/validation';
 import { ApiResponse } from '@/types';
-import { config } from '@/lib/config/env';
 
 export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{ session: { id: string; expiresAt: Date } }>>> {
   try {
+    // Check if database is configured
+    if (!process.env.DATABASE_URL) {
+      return NextResponse.json(
+        { success: false, error: 'Database not configured' },
+        { status: 500 }
+      );
+    }
+
     const body = await req.json();
 
     // Validate input
@@ -36,18 +43,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
       );
     }
 
-    // Verify origin (in production, check request headers)
+    // Verify origin
     const origin = req.headers.get('origin') || 'http://localhost:3000';
     if (!merchant.allowedOrigins.includes(origin) && !origin.includes('localhost')) {
-      // Log suspicious request
-      await db.auditLogs.create({
-        event: 'widget_init_origin_mismatch',
-        merchantId,
-        payload: { requestedOrigin: origin, allowedOrigins: merchant.allowedOrigins },
-        success: false,
-        error: 'Origin not allowed',
-      });
-
       return NextResponse.json(
         { success: false, error: 'Origin not allowed' },
         { status: 403 }
@@ -55,17 +53,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
     }
 
     // SECURITY: Recipient must match merchant's registered wallet
-    // We store the passed recipient for reference, but payment goes to merchant.walletAddress
     if (recipient.toLowerCase() !== merchant.walletAddress.toLowerCase()) {
       console.warn(`Recipient mismatch for ${merchantId}: ${recipient} vs ${merchant.walletAddress}`);
-      
-      await db.auditLogs.create({
-        event: 'widget_init_recipient_mismatch',
-        merchantId,
-        payload: { requestedRecipient: recipient, merchantWallet: merchant.walletAddress },
-        success: false,
-        error: 'Recipient mismatch',
-      });
     }
 
     // Create session
@@ -73,25 +62,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
       merchantId,
       amount,
       token,
-      recipient: merchant.walletAddress, // Always use merchant's verified wallet
+      recipient: merchant.walletAddress,
       chain: chain || 'base',
     });
-
-    // Log successful init
-    await db.auditLogs.create({
-      event: 'widget_init',
-      merchantId,
-      sessionId: session.id,
-      ipAddress: req.ip || undefined,
-      userAgent: req.headers.get('user-agent') || undefined,
-      origin,
-      payload: { amount, token, chain },
-      success: true,
-    });
-
-    if (config.isDevelopment) {
-      console.log(`Created widget session: ${session.id} for merchant: ${merchantId}`);
-    }
 
     return NextResponse.json({
       success: true,

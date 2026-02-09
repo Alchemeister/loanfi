@@ -6,19 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "cli": "tsx scripts/cli.ts",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:migrate:prod": "prisma migrate deploy",
-    "db:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts",
-    "db:reset": "prisma migrate reset",
-    "setup:check": "tsx scripts/setup-check.ts",
-    "vercel-build": "prisma generate && next build"
+    "lint": "eslint"
   },
   "dependencies": {
-    "@prisma/client": "^7.2.0",
+    "@prisma/client": "^6.0.0",
     "@privy-io/react-auth": "^3.11.0",
     "@rainbow-me/rainbowkit": "^2.2.10",
     "@tanstack/react-query": "^5.90.19",
