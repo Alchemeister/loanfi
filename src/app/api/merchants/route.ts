@@ -6,7 +6,7 @@ import { ApiResponse, Merchant } from '@/types';
 // GET /api/merchants - List all merchants (for demo)
 export async function GET(): Promise<NextResponse<ApiResponse<{ merchants: Merchant[] }>>> {
   try {
-    const merchants = db.merchants.list();
+    const merchants = await db.merchants.list();
 
     // Remove sensitive data
     const safeList = merchants.map(({ apiKey, ...rest }) => ({
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<{
     const { name, walletAddress, allowedOrigins } = parsed.data;
 
     // Create merchant
-    const merchant = db.merchants.create({
+    const merchant = await db.merchants.create({
       name,
       walletAddress,
       allowedOrigins,

@@ -8,7 +8,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<ApiResponse<{ 
     const { searchParams } = new URL(req.url);
     const chain = searchParams.get('chain') || undefined;
 
-    const pools = db.pools.list(chain);
+    const pools = await db.pools.list(chain);
 
     return NextResponse.json({
       success: true,
