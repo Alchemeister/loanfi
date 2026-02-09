@@ -12,8 +12,8 @@ export interface Merchant {
   updatedAt: Date;
   isActive: boolean;
   isVerified: boolean;
-  email?: string;
-  website?: string;
+  email: string | null;
+  website: string | null;
 }
 
 // Lending pool (Aave, Compound, etc.)
